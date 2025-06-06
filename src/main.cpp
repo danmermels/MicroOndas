@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
+#include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip.
 #include <SPI.h>
 #include <NTPClient.h>
 #include <WiFi.h>
@@ -22,7 +22,7 @@
 #define AutoEnter 1.5                                        // Auto accept cooking time
 #define Buffer 1.25                                          // Delay magnetron
 #define Debug 0                                              // 0-off 1-on
-#define scrRefresh 10                                        // seconds
+#define scrRefresh 10                                       // seconds
 
 // Define pins
 #define ENC_A 32
