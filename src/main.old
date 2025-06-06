@@ -1,0 +1,463 @@
+#include <Arduino.h>
+#include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
+#include <SPI.h>
+#include <NTPClient.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <ArduinoOTA.h>
+#include <ESPmDNS.h>
+#include "pitches.h"
+#include <credentials.h>
+
+#include "NotoSansBold15.h"
+#include "NotoSansBold36.h"
+
+#define FONT_SMALL NotoSansBold15
+#define FONT_LARGE NotoSansBold36
+#define AutoEnter 1500 // Auto accept cooking time
+#define Debug 1  // 0-off 1-on
+
+// Define pins
+#define ENC_A 32
+#define ENC_B 33
+#define SWTCH 12
+#define Door 26
+#define Motor 14
+#define Wave 27
+#define Spkr 25
+
+const char *ssid     = SSID;
+const char *password = PASS;
+const String endpoint = OpenWeatherCall;
+const String key = OpenWeatherKey;
+
+struct tm  ts;
+char buf[80];
+int temperature;
+int temperatureOLD;
+String description;
+
+unsigned int refreshTime = 30000;
+unsigned int refreshWeather = 30000;
+
+int melody[] = {                                           // notes in the melody:
+  NOTE_C4, NOTE_G3, NOTE_G3, NOTE_A3, NOTE_G3, 0, NOTE_B3, NOTE_C4
+};
+int noteDurations[] = {                                    // note durations: 4 = quarter note, 8 = eighth note, etc.:
+  4, 8, 8, 4, 4, 4, 4, 4
+};
+
+String payload = ""; //weather
+
+unsigned long timer = 0;        // Cooking time
+unsigned long timeout = 0;      // Menu Timer
+unsigned long paused = 0;       //Cooking time at Door Open
+unsigned long debugtimer = 1;
+bool door;                      //Door Status
+
+unsigned int mode = 0;          //Program mode
+unsigned int debounce = 0;      //Debouncer
+
+unsigned long _lastIncReadTime = micros(); 
+unsigned long _lastDecReadTime = micros(); 
+unsigned int _pauseLength = 25000;
+unsigned int _fastIncrement = 10;
+
+volatile int counter = 0; // Absolute Encoder position
+volatile int encoder = 1; // Relative Encoder position
+
+uint8_t hh=00, mm=00, ss=00;  //  H, M, S Declaration
+
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP);
+
+TFT_eSPI tft = TFT_eSPI();  // Invoke library, pins defined in User_Setup.h
+
+void read_encoder() {
+  // Encoder interrupt routine for both pins. Updates counter
+  // if they are valid and have rotated a full indent
+ 
+  static uint8_t old_AB = 3;  // Lookup table index
+  static int8_t encval = 0;   // Encoder value  
+  static const int8_t enc_states[]  = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0}; // Lookup table
+
+  old_AB <<=2;  // Remember previous state
+
+  if (digitalRead(ENC_A)) old_AB |= 0x02; // Add current state of pin A
+  if (digitalRead(ENC_B)) old_AB |= 0x01; // Add current state of pin B
+  
+  encval += enc_states[( old_AB & 0x0f )];
+
+  // Update counter if encoder has rotated a full indent, that is at least 4 steps
+  if( encval > 3 ) {        // Four steps forward
+    int changevalue = -1;
+    if((micros() - _lastIncReadTime) < _pauseLength) {
+      changevalue = _fastIncrement * changevalue; 
+    }
+    _lastIncReadTime = micros();
+    counter = counter + changevalue;              // Update counter
+    encval = 0;
+  }
+  else if( encval < -3 ) {        // Four steps backward
+    int changevalue = 1;
+    if((micros() - _lastDecReadTime) < _pauseLength) {
+      changevalue = _fastIncrement * changevalue; 
+    }
+    _lastDecReadTime = micros();
+    counter = counter + changevalue;              // Update counter
+    encval = 0;
+  }
+} 
+
+void twodigitprint (int n,int x, int y) {
+
+  if (n <=9) {
+     tft.unloadFont();
+    //tft.drawRect(x-21,y,45,30,TFT_RED);  
+    tft.drawNumber(0,x-30,y,7);  
+    tft.drawNumber(n,x,y,7);
+  }
+  else {
+    //tft.drawRect(x-21,y,45,30,TFT_RED); 
+    tft.drawNumber(n,x-30,y,7);
+  }
+}
+
+void button_press() {
+  if (millis() - debounce >= 500) { 
+    if (mode==1) {
+      encoder = counter - 60;
+      mode = 2;
+    }
+    else if (mode==2) {
+      digitalWrite(Motor,LOW);
+      digitalWrite(Wave,LOW);
+      timeout = millis();
+      //tft.fillScreen(TFT_BLACK);
+      mode = 6;    
+    }
+    else if (mode==3) {
+      digitalWrite(Motor,LOW);
+      digitalWrite(Wave,LOW);
+      timeout = millis();
+      //tft.fillScreen(TFT_BLACK);
+      mode = 6;      
+    }
+    else if (mode==4) {
+      digitalWrite(Motor,LOW);
+      digitalWrite(Wave,LOW);
+      timeout = millis();
+      //tft.fillScreen(TFT_BLACK);
+      mode = 6;      
+    }
+    debounce = millis();
+  } 
+}
+
+void setup(void) {
+  // Set encoder pins and attach interrupts
+  pinMode(ENC_A, INPUT_PULLUP);
+  pinMode(ENC_B, INPUT_PULLUP);
+  pinMode(SWTCH, INPUT_PULLUP);
+  pinMode(Door, INPUT_PULLUP);
+  pinMode(Motor, OUTPUT);
+  pinMode(Wave, OUTPUT);
+  attachInterrupt(digitalPinToInterrupt(ENC_A), read_encoder, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_B), read_encoder, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(SWTCH), button_press, CHANGE);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  while ( WiFi.status() != WL_CONNECTED ) {
+    delay ( 500 );
+    Serial.print ( "." );
+  }
+  timeClient.begin();
+  timeClient.setTimeOffset(-10800);
+
+  // Setup Display
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  
+  // Setup Serial
+  Serial.begin(115200);
+
+  // OTA
+  ArduinoOTA
+    .onStart([]() {
+      String type;
+      if (ArduinoOTA.getCommand() == U_FLASH)
+        type = "sketch";
+      else // U_SPIFFS
+        type = "filesystem";
+
+      // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+      Serial.println("Start updating " + type);
+    })
+    .onEnd([]() {
+      Serial.println("\nEnd");
+    })
+    .onProgress([](unsigned int progress, unsigned int total) {
+      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    })
+    .onError([](ota_error_t error) {
+      Serial.printf("Error[%u]: ", error);
+      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+      else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+  ArduinoOTA.begin();
+  
+  timeout = millis();
+}
+
+void loop() {
+  static int lastCounter = 0;
+  ArduinoOTA.handle();
+
+  if (mode==0) { // ******************************** MODE 0 - Splash Screen ***************************
+    digitalWrite(Motor,LOW);
+    digitalWrite(Wave,LOW);
+
+    tft.drawString("DoraMeena", 16, 40,4);
+    if (millis()-timeout>1500){ //if (millis() - timeout >= 5000); {
+      tft.fillScreen(TFT_BLACK);
+      timeout = millis();
+      mode=1;
+    }
+  }
+
+  if (mode==1) { // ******************************** MODE 1 - CLOCK ***********************************
+    digitalWrite(Motor,LOW);
+    digitalWrite(Wave,LOW); 
+
+    if (timeClient.getMinutes() != mm) {                   //Update Display Clock
+      hh = (timeClient.getHours()); 
+      mm = (timeClient.getMinutes());
+      twodigitprint(mm,115,12);
+      twodigitprint(hh,36,12);
+    }
+    if (temperature!=temperatureOLD||millis()-timeout<20) {//Update Display Temperature
+      tft.loadFont(FONT_SMALL);
+      tft.drawString(buf,2,90,4);
+      tft.drawNumber(temperature,127,90,4);
+      tft.unloadFont();
+      tft.drawString("o",148,90,1);
+      tft.unloadFont();
+      temperatureOLD = temperature;
+    } 
+    if (timeClient.getSeconds() != ss) {                   //Update Display Flashing Colon
+      ss = (timeClient.getSeconds());
+      if (ss%2==0) {
+        tft.drawString(":",70,14,7);
+      }
+      else {
+        tft.fillRect(69,21,14,36,TFT_BLACK);
+      }
+    }
+    if(counter != lastCounter){                            // On Encoder Events
+      tone(Spkr,2300,4);
+      if ( encoder < counter ) {
+        ss = 0;
+        mm = 0;
+        hh = 0;
+        twodigitprint(ss,115,12);
+        twodigitprint(mm,36,12);
+        mode=2;
+        timeout = millis();
+      }
+      encoder = counter ;  // Reset encoder offset
+      lastCounter = counter;
+    }
+  }
+
+  if (mode==2) { // ******************************** MODE 2 - TIME SELECT *****************************
+    digitalWrite(Motor,LOW);
+    digitalWrite(Wave,LOW);
+
+    if(counter != lastCounter){                            // On Encoder Events
+      tone(25,2300,4);
+      timeout = millis();
+      if (counter-encoder<0) {
+        encoder = counter;
+      }
+      ss = (counter - encoder) %60;
+      mm = ((counter - encoder) /60)%60;
+      hh = ((counter - encoder) /60/60)%60;
+      twodigitprint(ss,115,12);
+      twodigitprint(mm,36,12);
+      lastCounter = counter;
+    }
+    if (millis() - timeout >= AutoEnter) {                 // Auto Enter
+      mode=3;
+      timer = millis();
+      timeout = millis();
+      tft.fillScreen(TFT_BLACK);
+    }
+  }
+
+  if (mode==3) { // ******************************** MODE 3 - COOKING *********************************
+    digitalWrite(Motor,HIGH);
+    digitalWrite(Wave,HIGH);
+
+    int countdown = (counter - encoder) - ((millis()-timer)/1000);
+    if (countdown > 0 ) {
+      ss = (countdown )%60;
+      mm = (countdown /60)%60;
+      hh = (countdown /60/60)%60;
+      twodigitprint(ss,115,12);
+      twodigitprint(mm,36,12);
+      
+      paused = countdown;
+
+      if(counter != lastCounter){                          // On Encoder Events
+        tone(Spkr,2300,4);
+      }
+
+      door = digitalRead(Door);
+      if (door==1) {
+        encoder = counter;
+        timeout=millis();
+        mode=4;
+      }
+    }
+    else {
+    tft.fillScreen(TFT_BLACK);
+    timeout = millis();
+    mode = 5;
+    }
+  }
+
+  if (mode==4) { // ******************************** MODE 4 - Door Open *******************************
+      digitalWrite(Motor,LOW);
+      digitalWrite(Wave,LOW);
+
+    int countdown = paused + counter - encoder;
+    if (countdown > 0 ) {
+      ss = (countdown )%60;
+      mm = (countdown /60)%60;
+      hh = (countdown /60/60)%60;
+      twodigitprint(ss,115,12);
+      twodigitprint(mm,36,12);
+    }
+    door = digitalRead(Door);
+    if (door==0) {
+      encoder = counter - countdown;
+      timer = millis();
+      mode=3;
+    }
+    if (millis() - timeout >= 10000){
+      timeout = millis();
+      mode=6;
+    }
+  }
+
+  if (mode==5) { // ******************************** MODE 5 - Done Cooking ****************************
+    digitalWrite(Motor,LOW);
+    digitalWrite(Wave,LOW);
+
+    tft.drawString("DONE !",45, 25,4);
+    tft.drawString("ENJOY !",35 , 70,4);
+
+// iterate over the notes of the melody:
+  for (int thisNote = 0; thisNote < 8; thisNote++) {
+
+    // to calculate the note duration, take one second divided by the note type.
+    //e.g. quarter note = 1000 / 4, eighth note = 1000/8, etc.
+    int noteDuration = 1000 / noteDurations[thisNote];
+    tone(25, melody[thisNote], noteDuration);
+
+    // to distinguish the notes, set a minimum time between them.
+    // the note's duration + 30% seems to work well:
+    int pauseBetweenNotes = noteDuration * 1.30;
+    delay(pauseBetweenNotes);
+    // stop the tone playing:
+    noTone(25);
+  }
+
+    if (millis()-timeout>1000){
+      tft.fillScreen(TFT_BLACK);
+      noTone(Spkr);
+      timeout = millis();
+      mode=1;
+    }
+}
+
+  if (mode==6) { // ******************************** MODE 6 - Canceled ********************************
+    digitalWrite(Motor,LOW);
+    digitalWrite(Wave,LOW);
+    if (millis()-timeout<20){
+      tft.fillScreen(TFT_BLACK);
+    }
+    tft.drawString("Bye Bye",32 ,46, 4);
+    if (millis()-timeout>1500){
+      tft.fillScreen(TFT_BLACK);
+      timeout = millis();
+      mode=1;
+    }
+}
+
+  if (millis()-refreshTime > 3600000) { //************ CLOCK REFRESH
+    timeClient.update();
+    refreshTime= millis();
+    }
+
+  if (millis()-refreshWeather > 600000) { //******** WEATHER REFRESH
+    HTTPClient http;
+    http.begin(endpoint + key); //Specify the URL
+    int httpCode = http.GET();  //Make the request
+    if (httpCode > 0) { //Check for the returning code
+      payload = http.getString();
+      Serial.println(httpCode);
+      Serial.println(payload);
+      }
+    else {
+      Serial.println("Error on HTTP request");
+      }
+    
+    http.end(); //Free the resources
+
+
+
+    DynamicJsonDocument jsonBuffer(1024);
+    DeserializationError error = deserializeJson(jsonBuffer, payload);
+    if (error) {
+      Serial.print("Deserialization failed with code: ");
+      Serial.println(error.c_str());
+      return;
+      }
+    JsonArray array = jsonBuffer["weather"].as<JsonArray>();
+    temperature = (float)(jsonBuffer["main"]["temp"]);
+    //description = (string)(jsonBuffer["weather"]["description"]);
+
+    time_t     rawtime = (jsonBuffer["dt"]);
+
+    rawtime = rawtime -10800;
+    ts = *localtime(&rawtime);
+    strftime(buf, sizeof(buf), "%a %d-%m", &ts);
+    printf("%s\n", buf);
+    refreshWeather = millis();
+    }
+
+  if (Debug && millis()-debugtimer >= 1000) {// **** DEBUG ********************************************
+  Serial.print(" timer "); Serial.print(timer); Serial.print(" ");
+  Serial.print("paused ");Serial.print(paused);
+  Serial.print(" door "); Serial.print(digitalRead(Door)); Serial.print(" ");
+  Serial.print(" encoder "); Serial.print(encoder); Serial.print(" ");
+  Serial.print("counter "); Serial.print(counter); Serial.print(" ");
+  Serial.print("time "); Serial.print (timeClient.getHours()); Serial.print(" ");
+  Serial.print("date "); Serial.print (buf); Serial.print(" ");
+  Serial.print("button "); Serial.print (digitalRead(SWTCH)); Serial.print(" ");
+  Serial.print("temperature "); Serial.print (temperature); Serial.print(" ");
+  //Serial.print("IP "); Serial.print(WiFi.localIP()); Serial.print(" "); 
+  Serial.print("Mode "); Serial.println(mode);
+
+  debugtimer = millis();
+  }
+}
