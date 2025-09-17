@@ -9,6 +9,7 @@
 #include <ArduinoOTA.h>
 //#include <ESPmDNS.h>
 #include "pitches.h"
+#include "Music.h"
 #include <credentials.h>
 
 //#include "NotoSansBold15.h"
@@ -53,12 +54,7 @@ String data;
 unsigned int refreshTime = 30000;
 unsigned int refreshWeather = 30000;
 
-int melody[] = {                                           // notes in the melody:
-  NOTE_C4, NOTE_G3, NOTE_G3, NOTE_A3, NOTE_G3, 0, NOTE_B3, NOTE_C4
-};
-int noteDurations[] = {                                    // note durations: 4 = quarter note, 8 = eighth note, etc.:
-  4, 8, 8, 4, 4, 4, 4, 4
-};
+
 
 String payload = ""; //weather
 
@@ -266,7 +262,15 @@ void setup(void) {
   digitalWrite(Light,LOW);
   digitalWrite(Mag,LOW);
   
-  WiFi.mode(WIFI_STA);                                             // WiFi Start
+  //WIFI
+  IPAddress local_IP(192,168,15,151);                                           // WiFi Start
+  IPAddress gateway(192,168,15,1);
+  IPAddress subnet(255,255,255,0);
+  IPAddress dns1(192,168,15,1);
+  IPAddress dns2(0,0,0,0);
+  WiFi.mode(WIFI_STA); 
+  WiFi.config(local_IP, gateway, subnet, dns1, dns2);
+  WiFi.setHostname("MicroOndas");
   WiFi.begin(ssid, password);
   while ( WiFi.status() != WL_CONNECTED ) {
     delay ( 500 );
@@ -562,21 +566,7 @@ void loop() {
     tft.drawString("DONE !", 45, 20, 4);
     tft.drawString("ENJOY !", 35 , 80, 4);
 
-  // iterate over the notes of the melody:
-  for (int thisNote = 0; thisNote < 8; thisNote++) {
-
-    // to calculate the note duration, take one second divided by the note type.
-    //e.g. quarter note = 1000 / 4, eighth note = 1000/8, etc.
-    int noteDuration = 1000 / noteDurations[thisNote];
-    tone(25, melody[thisNote], noteDuration);
-
-    // to distinguish the notes, set a minimum time between them.
-    // the note's duration + 30% seems to work well:
-    int pauseBetweenNotes = noteDuration * 1.0;
-    delay(pauseBetweenNotes);
-    // stop the tone playing:
-    noTone(Spkr);
-  }
+  playMelody(Spkr);
 
     if (millis()-timeout>1000){
       tft.fillScreen(BgColour);
