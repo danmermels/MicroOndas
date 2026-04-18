@@ -51,10 +51,8 @@ String temperature;
 String description;
 String data;
 
-unsigned int refreshTime = 30000;
-unsigned int refreshWeather = 30000;
-
-
+unsigned long refreshTime = 0;
+unsigned long refreshWeather = 0;
 
 String payload = ""; //weather
 
@@ -64,20 +62,14 @@ unsigned long paused = 0;          // Cooking time at Door Open
 unsigned long magwait = 1;         // Delay Mag
 unsigned long refreshTimer = 0;    // Screen refresh timer
 unsigned long debugtimer = 1;      // Debug timer
+unsigned long selectedSeconds = 0;   // Time selected at last encoder event
 bool door;                         // Door Status
 bool ScrRefresh = 1;               // Screen rfsh Status
 
 unsigned int mode = 0;             //Program mode
-unsigned int debounce = 0;         //Debouncer
 
-unsigned long _lastIncReadTime = micros();
-unsigned long _lastDecReadTime = micros();
-unsigned int _pauseLength = 25000;
-unsigned int _fastIncrement = 10;
-
-volatile int counter = 0; // Absolute Encoder position
-volatile int encoder = 1; // Relative Encoder position
-volatile int Button = 0; // Relative Encoder position
+int counter = 0; // Absolute Encoder position
+int encoder = 1; // Relative Encoder position
 
 uint8_t hh=00, mm=00, ss=00;  //  H, M, S Declaration
 
@@ -111,9 +103,23 @@ void openWeatherFetch () {
    // JsonArray array = jsonBuffer["weather"].as<JsonArray>();
     //temperature = (float)(jsonBuffer["main"]["temp"]);
     data = payload.substring(payload.indexOf("dt")+4 , payload.indexOf("dt")+14);
-    temperature = payload.substring(payload.indexOf("temp")+6 , payload.indexOf("." , payload.indexOf("temp"))+2);
-    description = payload.substring(payload.indexOf("description")+14 , payload.indexOf("," , payload.indexOf("description"))-1);
+    //temperature = payload.substring(payload.indexOf("temp")+6 , payload.indexOf("." , payload.indexOf("temp"))+2);
+    //description = payload.substring(payload.indexOf("description")+14 , payload.indexOf("," , payload.indexOf("description"))-1);
+    int tempIdx = payload.indexOf("temp");
+    if (tempIdx > 0)
+    {
+      int dotIdx = payload.indexOf(".", tempIdx);
+      if (dotIdx > 0)
+        temperature = payload.substring(tempIdx + 6, dotIdx + 2);
+    }
 
+    int descIdx = payload.indexOf("description");
+    if (descIdx > 0)
+    {
+      int commaIdx = payload.indexOf(",", descIdx);
+      if (commaIdx > 0)
+        description = payload.substring(descIdx + 14, commaIdx - 1);
+    }
     //Serial.println(description);
     const char* charArray = data.c_str(); //(jsonBuffer["dt"]); //
 
@@ -156,38 +162,69 @@ void quotesFetch () {
 }
 
 void read_encoder() {
-  // Encoder interrupt routine for both pins. Updates counter
-  // if they are valid and have rotated a full indent
+  static uint8_t lastStableState = 3;
+  static uint8_t lastState = 3;
+  static unsigned long lastStateTime = 0;
+  static unsigned long lastCountTime = 0;
+  const unsigned long settleTime = 250;
+  const unsigned long fastThreshold = 50000;
+  const int fastMultiplier = 3;
 
-  static uint8_t old_AB = 3;  // Lookup table index
-  static int8_t encval = 0;   // Encoder value
-  static const int8_t enc_states[]  = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0}; // Lookup table
+  uint8_t currentState = (digitalRead(ENC_A) << 1) | digitalRead(ENC_B);
 
-  old_AB <<=2;  // Remember previous state
-
-  if (digitalRead(ENC_A)) old_AB |= 0x02; // Add current state of pin A
-  if (digitalRead(ENC_B)) old_AB |= 0x01; // Add current state of pin B
-
-  encval += enc_states[( old_AB & 0x0f )];
-
-  // Update counter if encoder has rotated a full indent, that is at least 4 steps
-  if( encval > 3 ) {        // Four steps forward
-    int changevalue = -1;
-    if((micros() - _lastIncReadTime) < _pauseLength) {
-      changevalue = _fastIncrement * changevalue;
-    }
-    _lastIncReadTime = micros();
-    counter = counter + changevalue;              // Update counter
-    encval = 0;
+  if (currentState != lastState) {
+    lastState = currentState;
+    lastStateTime = micros();
   }
-  else if( encval < -3 ) {        // Four steps backward
-    int changevalue = 1;
-    if((micros() - _lastDecReadTime) < _pauseLength) {
-      changevalue = _fastIncrement * changevalue;
+  else if (currentState != lastStableState && micros() - lastStateTime >= settleTime) {
+    if (currentState == 3) {
+      int change = 0;
+      if (lastStableState == 1) change = 1;
+      if (lastStableState == 2) change = -1;
+      if (change != 0) {
+        if (micros() - lastCountTime < fastThreshold) change *= fastMultiplier;
+        counter += change;
+        lastCountTime = micros();
+      }
     }
-    _lastDecReadTime = micros();
-    counter = counter + changevalue;              // Update counter
-    encval = 0;
+    lastStableState = currentState;
+  }
+}
+
+void read_button() {
+  static bool lastButtonState = HIGH;
+  static unsigned long lastDebounceTime = 0;
+  const unsigned long debounceDelay = 100000; // 50ms in microseconds
+
+  bool currentState = digitalRead(SWTCH);
+
+  if (currentState != lastButtonState) {
+    lastDebounceTime = micros();
+    lastButtonState = currentState;
+  }
+
+  if (micros() - lastDebounceTime >= debounceDelay) {
+    if (currentState == LOW) {  // button pressed (INPUT_PULLUP = LOW when pressed)
+      if (mode == 1) {
+        selectedSeconds = 20;
+        timer = millis();
+        magwait = millis();
+        timeout = millis();
+        tft.fillScreen(BgColour);
+        mode = 3;
+      }
+      else if (mode == 3) {
+        digitalWrite(Light, LOW);
+        digitalWrite(Mag, LOW);
+        tft.fillScreen(BgColour);
+        encoder = counter;
+        timeout = millis();
+        timer = millis();
+        paused = 0;
+        mode = 6;
+      }
+      lastDebounceTime = micros() + 1000000; // 500ms lockout after trigger
+    }
   }
 }
 
@@ -205,50 +242,6 @@ void twodigitprint (int n,int x, int y) {
   }
 }
 
-/*
-void button_press() {
-  if (millis() - debounce >= 2000) {
-    if (mode==1) {
-      //encoder = counter - 60;
-      //mode = 2;
-    }
-    else if (mode==2) {
-      digitalWrite(Light,LOW);
-      digitalWrite(Mag,LOW);
-      timeout = millis();
-      timer = millis();
-      paused = 0;
-      //tft.fillScreen(FgColour);
-      mode = 6;
-    }
-    else if (mode==3) {
-      digitalWrite(Light,LOW);
-      digitalWrite(Mag,LOW);
-
-      encoder = counter;
-      timeout = millis();
-      timer = millis();
-      paused = 0;
-      //tft.fillScreen(FgColour);
-      mode = 6;
-    }
-    else if (mode==4) {
-      digitalWrite(Light,LOW);
-      digitalWrite(Mag,LOW);
-
-      encoder = counter;
-      timeout = millis();
-      timer = millis();
-      paused = 0;
-      //tft.fillScreen(FgColour);
-      mode = 6;
-    }
-    Button = 0;
-    debounce = millis();
-  }
-}
-*/
-
 void setup(void) {
   pinMode(ENC_A, INPUT_PULLUP);                                    // Set encoder pins and attach interrupts
   pinMode(ENC_B, INPUT_PULLUP);
@@ -256,8 +249,6 @@ void setup(void) {
   pinMode(Door, INPUT_PULLUP);
   pinMode(Light, OUTPUT);
   pinMode(Mag, OUTPUT);
-  attachInterrupt(digitalPinToInterrupt(ENC_A), read_encoder, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_B), read_encoder, CHANGE);
 
   digitalWrite(Light,LOW);
   digitalWrite(Mag,LOW);
@@ -313,12 +304,20 @@ void setup(void) {
     });
 
   ArduinoOTA.begin();
+  timeClient.update();
+  quotesFetch();
+  openWeatherFetch();
+  refreshTime = millis();
+  refreshWeather = millis();
   timeout = millis();
+
 #pragma endregion  
 }
 
 void loop() {
   static int lastCounter = 0;
+  read_encoder();
+  read_button();
   ArduinoOTA.handle();
   door = digitalRead(Door);
 
@@ -361,7 +360,6 @@ void loop() {
       delay(1000);
       ESP.restart();
       //digitalWrite(Light,HIGH);
-      delay(1000);
     }
 
     if (timeClient.getSeconds() != ss) {                     // Update Display Flashing Colon
@@ -422,6 +420,7 @@ void loop() {
     }
     if (millis() - timeout >= AutoEnter*1000) {                   // Auto Enter
       if (ss >= 3) {
+        selectedSeconds = (counter - encoder);
         mode=3;
         timer = millis();
         timeout = millis();
@@ -445,7 +444,15 @@ void loop() {
       digitalWrite(Mag,HIGH);
     }
 
-    int countdown = (counter - encoder) - ((millis() - timer)/1000);
+    long countdown = (long)selectedSeconds - ((millis() - timer)/1000);
+    if (countdown <= 0) {
+      tft.fillScreen(BgColour);
+      encoder = counter;
+      timeout = millis();
+      timer = millis();
+      paused = 0;
+      mode = 5;
+    }
     
     if (countdown > 0 ) {                                    // While theres time to cook
       ss = (countdown )%60;
@@ -464,33 +471,29 @@ void loop() {
 
       paused = countdown;
 
-      if(counter != lastCounter){                            // On Encoder Events
+      if(counter != lastCounter){
         tone(Spkr,2300,4);
-        if ( ss <= 8 ) {                                     // User Cancel
-        tft.fillScreen(BgColour);
-        encoder = counter;
-        timeout = millis();
+        int change = counter - lastCounter;
+        change = constrain(change, -1, 1);
+        selectedSeconds = (long)selectedSeconds + change;
         timer = millis();
-        paused = 0;
-        mode = 6;       
-        }
         lastCounter = counter;
-      }
-    }
 
-    else {                                                   // When time runs out
-      tft.fillScreen(BgColour);
-      encoder = counter;
-      timeout = millis();
-      timer = millis();
-      paused = 0;
-      mode = 5;
+        if ( ss <= 0 ) {
+         tft.fillScreen(BgColour);
+         encoder = counter;
+         timeout = millis();
+         timer = millis();
+         paused = 0;
+         mode = 6;       
+        }
+      }
+    paused = countdown;  // ← always update, unconditionally
     }
 
     door = digitalRead(Door);
 
     if (door == 1) {                                         // Door Opens
-      
       tft.fillScreen(BgColour);
       tft.drawString("OPEN DOOR",30,76,7);
       encoder = counter;
@@ -502,60 +505,93 @@ void loop() {
   }
 
   if (mode==4) { // ******************************** MODE 4 - Door Open *******************************
-      digitalWrite(Light,HIGH);
-      digitalWrite(Mag,LOW);
+    digitalWrite(Light,HIGH);
+    digitalWrite(Mag,LOW);
 
-    int countdown = paused + counter - encoder;
+  long countdown = (long)paused + counter - encoder;
 
-    if (countdown > 8 ) {
-      ss = (countdown )%60;
-      mm = (countdown /60)%60;
-      hh = (countdown /60/60)%60;
-      twodigitprint(ss,115,9);
-      twodigitprint(mm,36,9);
-      tft.drawString(":",70,14,7);
+  if (countdown <= 1 && paused > 0) {
+    tft.fillScreen(BgColour);
+    encoder = counter;
+    timeout = millis();
+    timer = millis();
+    paused = 0;
+    mode = 6;
+  }
+
+  if (paused > 0) {
+    tft.setTextColor(TFT_RED, BgColour);
+    tft.drawCentreString("PAUSED", 80, 9, 4);
+    tft.drawFastHLine(0, 35, 160, TFT_RED);
+    tft.setTextColor(FgColour, BgColour);
+
+    static int lastCounterInMode4 = -1;
+    static int lastFlashSecond = -1;
+    bool encoderMoved = (counter != lastCounterInMode4);
+    bool flashOn = (millis() / 1000) % 2 == 0;
+    char timeStr[6];
+    sprintf(timeStr, "%02d:%02d", (int)(countdown / 60) % 60, (int)countdown % 60);
+
+    if (encoderMoved || (int)(millis() / 1000) != lastFlashSecond) {
+      if (flashOn || encoderMoved) {
+        tft.setTextColor(FgColour, BgColour);
+        tft.drawCentreString(timeStr, 80, 40, 2);
+      } else {
+        tft.setTextColor(BgColour, BgColour);
+        tft.drawCentreString(timeStr, 80, 40, 2);
+        tft.setTextColor(FgColour, BgColour);
+      }
+      if (encoderMoved) tone(Spkr, 2300, 4);
+      lastCounterInMode4 = counter;
+      lastFlashSecond = (int)(millis() / 1000);
     }
 
-      tft.setTextColor(TFT_RED, BgColour);
-      tft.drawString("OPEN DOOR", 5, 80, 4);
-      
-      if (door==0) {
-        tft.setTextColor(FgColour, BgColour);
-
-        if (paused > 0) {
-          encoder = counter - countdown;
-          timer = millis();
-          timeout = millis ();
-          tft.fillScreen(BgColour);
-          ScrRefresh = 1;        
-          mode=3;
-        }
-
-        else {
-          encoder = counter;
- 
-          timer = millis();
-          timeout = millis ();
-          tft.fillScreen(BgColour);
-          ScrRefresh = 1;
-          mode=1;
-        }
-      }  
-      
-      if (millis() - timeout >= 10000){
-        if (paused > 0) {
-          encoder = counter;
-          timeout = millis();
-          timer = 0;
-          paused = 0;
-          tft.fillScreen(BgColour);
-          ScrRefresh = 1;        
-          mode=6;
-        }
-      }
-
-    door = digitalRead(Door);
+    tft.drawString(quoteLN1, 10, 65, 1);
+    tft.drawString(quoteLN2, 10, 75, 1);
+    tft.drawString(quoteLN3, 10, 85, 1);
+    tft.drawString(quoteLN4, 10, 95, 1);
+    tft.drawRightString(quoteLN5, 145, 110, 1);
   }
+  else {
+    tft.setTextColor(TFT_RED, BgColour);
+    tft.drawString("OPEN DOOR", 5, 80, 4);
+  }
+  tft.setTextColor(FgColour, BgColour);
+
+  if (door==0) {
+    if (paused > 0) {
+      selectedSeconds = countdown;
+      timer = millis();
+      timeout = millis();
+      lastCounter = counter;
+      tft.fillScreen(BgColour);
+      ScrRefresh = 1;
+      mode=3;
+    }
+    else {
+      encoder = counter;
+      timer = millis();
+      timeout = millis();
+      tft.fillScreen(BgColour);
+      ScrRefresh = 1;
+      mode=1;
+    }
+  }
+
+  if (millis() - timeout >= 10000) {
+    if (paused > 0) {
+      encoder = counter;
+      timeout = millis();
+      timer = 0;
+      paused = 0;
+      tft.fillScreen(BgColour);
+      ScrRefresh = 1;
+      mode=6;
+    }
+  }
+
+  door = digitalRead(Door);
+}
 
   if (mode==5) { // ******************************** MODE 5 - Done Cooking ****************************
     digitalWrite(Light,HIGH);
@@ -619,7 +655,7 @@ void loop() {
   Serial.print(" counter "); Serial.print(counter); Serial.print(" ");
   //Serial.print("time "); Serial.print (timeClient.getHours()); Serial.print(" ");
   //Serial.print("date "); Serial.print (buf); Serial.print(" ");
-  Serial.print(" button "); Serial.print (Button); Serial.print(" ");
+  //Serial.print(" button "); Serial.print (button); Serial.print(" ");
   Serial.print(" ScrRefresh "); Serial.print (ScrRefresh); Serial.print(" ");
   Serial.print(" refreshTimer "); Serial.print (millis()-refreshTimer); Serial.print(" ");
   //Serial.print("button read 5"); Serial.print (analogRead(34)); Serial.print(" ");
