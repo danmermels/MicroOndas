@@ -81,6 +81,19 @@ TFT_eSPI tft = TFT_eSPI();  // Invoke library, pins defined in User_Setup.h
 
 NonBlockingMelody buzzer(Spkr);
 
+// Connects to WiFi STA with a static IP config.
+void connectWiFi() {
+  IPAddress local_IP(192, 168, 15, 151);
+  IPAddress gateway(192, 168, 15, 1);
+  IPAddress subnet(255, 255, 255, 0);
+  IPAddress dns1(192, 168, 15, 1);
+  IPAddress dns2(0, 0, 0, 0);
+  WiFi.mode(WIFI_STA);
+  WiFi.config(local_IP, gateway, subnet, dns1, dns2);
+  WiFi.setHostname("MicroOndas");
+  WiFi.begin(ssid, password);
+}
+
 // Pauses the WiFi radio and turns it completely OFF.
 // This is used during encoder rotation and active cooking to prevent 
 // radio frequency noise and connection lags from blocking the loop.
@@ -99,8 +112,7 @@ void pauseWiFiFor(unsigned long durationMs) {
 void manageWiFiState() {
   if (mode == 1) {
     if (millis() >= wifiQuietUntil && WiFi.getMode() == WIFI_OFF) {
-      WiFi.mode(WIFI_STA);
-      WiFi.begin(ssid, password);
+      connectWiFi();
     }
   } else {
     if (WiFi.getMode() != WIFI_OFF) {
@@ -161,45 +173,45 @@ void wrapQuote(const String& quote, const String& author) {
 // Safely fetches the current weather, local temperature, and timestamp from OpenWeatherMap
 // and parses it using ArduinoJson. Supports integer temp responses cleanly.
 void openWeatherFetch () {
-    HTTPClient http;
-    http.begin(endpoint + key); // Specify the URL
-    int httpCode = http.GET();  // Make the GET request
-    if (httpCode > 0) { 
-      payload = http.getString();
-      Serial.println(httpCode);
-      Serial.println(payload);
+  HTTPClient http;
+  http.begin(endpoint + key); // Specify the URL
+  int httpCode = http.GET();  // Make the GET request
+  if (httpCode > 0) { 
+    payload = http.getString();
+    Serial.println(httpCode);
+    Serial.println(payload);
 
-      StaticJsonDocument<1024> doc;
-      DeserializationError error = deserializeJson(doc, payload);
-      if (!error) {
-        // Retrieve and format the temperature
-        if (doc.containsKey("main") && doc["main"].containsKey("temp")) {
-          float tempVal = doc["main"]["temp"];
-          temperature = String(tempVal, 1);
-        }
-        // Retrieve the short weather description
-        if (doc.containsKey("weather") && doc["weather"].is<JsonArray>()) {
-          JsonArray weatherArr = doc["weather"].as<JsonArray>();
-          if (weatherArr.size() > 0) {
-            description = weatherArr[0]["description"].as<String>();
-          }
-        }
-        // Retrieve and format the weather report timestamp
-        if (doc.containsKey("dt")) {
-          long dtVal = doc["dt"];
-          time_t rawtime = dtVal;
-          ts = *localtime(&rawtime);
-          strftime(buf, sizeof(buf), "%a %d-%m", &ts);
-        }
-      } else {
-        Serial.print("Deserialization failed: ");
-        Serial.println(error.c_str());
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (!error) {
+      // Retrieve and format the temperature
+      if (doc.containsKey("main") && doc["main"].containsKey("temp")) {
+        float tempVal = doc["main"]["temp"];
+        temperature = String(tempVal, 1);
       }
+      // Retrieve the short weather description
+      if (doc.containsKey("weather") && doc["weather"].is<JsonArray>()) {
+        JsonArray weatherArr = doc["weather"].as<JsonArray>();
+        if (weatherArr.size() > 0) {
+          description = weatherArr[0]["description"].as<String>();
+        }
+      }
+      // Retrieve and format the weather report timestamp
+      if (doc.containsKey("dt")) {
+        long dtVal = doc["dt"];
+        time_t rawtime = dtVal;
+        ts = *localtime(&rawtime);
+        strftime(buf, sizeof(buf), "%a %d-%m", &ts);
+      }
+    } else {
+      Serial.print("Deserialization failed: ");
+      Serial.println(error.c_str());
     }
-    else {
-      Serial.println("Error on HTTP request");
-    }
-    http.end(); // Free the resources
+  }
+  else {
+    Serial.println("Error on HTTP request");
+  }
+  http.end(); // Free the resources
 }
   
 // Fetches a random quote of the day from ZenQuotes API, parses the JSON safely
@@ -313,7 +325,7 @@ void read_button() {
 void twodigitprint (int n,int x, int y) {
 
   if (n <=9) {
-     tft.unloadFont();
+    tft.unloadFont();
     //tft.drawRect(x-21,y,45,30,TFT_RED);
     tft.drawNumber(0,x-30,y,7);
     tft.drawNumber(n,x,y,7);
@@ -343,6 +355,8 @@ bool readDoor() {
 }
 
 void setup(void) {
+  Serial.begin(115200);                                            // Serial Setup
+
   pinMode(ENC_A, INPUT_PULLUP);                                    // Set encoder pins and attach interrupts
   pinMode(ENC_B, INPUT_PULLUP);
   pinMode(SWTCH, INPUT_PULLUP);
@@ -354,15 +368,7 @@ void setup(void) {
   digitalWrite(Mag,LOW);
   
   //WIFI
-  IPAddress local_IP(192,168,15,151);                                           // WiFi Start
-  IPAddress gateway(192,168,15,1);
-  IPAddress subnet(255,255,255,0);
-  IPAddress dns1(192,168,15,1);
-  IPAddress dns2(0,0,0,0);
-  WiFi.mode(WIFI_STA); 
-  WiFi.config(local_IP, gateway, subnet, dns1, dns2);
-  WiFi.setHostname("MicroOndas");
-  WiFi.begin(ssid, password);
+  connectWiFi();
   while ( WiFi.status() != WL_CONNECTED ) {
     delay ( 500 );
     Serial.print ( "." );
@@ -375,8 +381,6 @@ void setup(void) {
   tft.setRotation(1);
   tft.fillScreen(BgColour);
   tft.setTextColor(FgColour, BgColour);
-
-  Serial.begin(115200);                                            // Serial Setup
 
   #pragma region                                                   // OTA
   ArduinoOTA                                                       // OTA
@@ -628,107 +632,107 @@ void loop() {
     digitalWrite(Light,HIGH);
     digitalWrite(Mag,LOW);
 
-  long countdown = (long)paused + counter - encoder;
+    long countdown = (long)paused + counter - encoder;
 
-  if (countdown <= 1 && paused > 0) {
-    tft.fillScreen(BgColour);
-    encoder = counter;
-    timeout = millis();
-    timer = millis();
-    paused = 0;
-    ScrRefresh = 1;
-    mode = 6;
-    return;
-  }
-
-  if (paused > 0) {
-    if (ScrRefresh == 1) {
-      tft.setTextColor(TFT_RED, BgColour);
-      tft.drawCentreString("PAUSED", 80, 9, 4);
-      tft.drawFastHLine(0, 35, 160, TFT_RED);
-      
-      tft.setTextColor(FgColour, BgColour);
-
-      // Quote starting at y=65 (like Mode 3) since "OPEN DOOR" text was removed
-      tft.drawString(quoteLN1, 10, 65, 1);
-      tft.drawString(quoteLN2, 10, 75, 1);
-      tft.drawString(quoteLN3, 10, 85, 1);
-      tft.drawString(quoteLN4, 10, 95, 1);
-      tft.drawRightString(quoteLN5, 145, 110, 1);
-    }
-
-    static int lastCounterInMode4 = -1;
-    static int lastFlashSecond = -1;
-    bool encoderMoved = (counter != lastCounterInMode4);
-    bool flashOn = (millis() / 1000) % 2 == 0;
-    char timeStr[6];
-    sprintf(timeStr, "%02d:%02d", (int)(countdown / 60) % 60, (int)countdown % 60);
-
-    if (encoderMoved || (int)(millis() / 1000) != lastFlashSecond || ScrRefresh == 1) {
-      if (flashOn || encoderMoved) {
-        tft.setTextColor(FgColour, BgColour);
-        tft.drawCentreString(timeStr, 80, 40, 2);
-      } else {
-        tft.setTextColor(BgColour, BgColour);
-        tft.drawCentreString(timeStr, 80, 40, 2);
-        tft.setTextColor(FgColour, BgColour);
-      }
-      if (encoderMoved) {
-        tone(Spkr, 2300, 4);
-        timeout = millis(); // Reset timeout on encoder activity
-      }
-      lastCounterInMode4 = counter;
-      lastFlashSecond = (int)(millis() / 1000);
-    }
-    
-    if (ScrRefresh == 1) {
-      ScrRefresh = 0;
-    }
-  }
-  else {
-    if (ScrRefresh == 1) {
-      tft.setTextColor(TFT_RED, BgColour);
-      tft.drawCentreString("OPEN DOOR", 80, 50, 4); // Center of the screen in Font 4
-      ScrRefresh = 0;
-    }
-  }
-  tft.setTextColor(FgColour, BgColour);
-
-  if (door==0) {
-    if (paused > 0) {
-      selectedSeconds = countdown;
-      timer = millis();
-      timeout = millis();
-      lastCounter = counter;
+    if (countdown <= 1 && paused > 0) {
       tft.fillScreen(BgColour);
+      encoder = counter;
+      timeout = millis();
+      timer = millis();
+      paused = 0;
       ScrRefresh = 1;
-      mode=3;
+      mode = 6;
       return;
+    }
+
+    if (paused > 0) {
+      if (ScrRefresh == 1) {
+        tft.setTextColor(TFT_RED, BgColour);
+        tft.drawCentreString("PAUSED", 80, 9, 4);
+        tft.drawFastHLine(0, 35, 160, TFT_RED);
+        
+        tft.setTextColor(FgColour, BgColour);
+
+        // Quote starting at y=65 (like Mode 3) since "OPEN DOOR" text was removed
+        tft.drawString(quoteLN1, 10, 65, 1);
+        tft.drawString(quoteLN2, 10, 75, 1);
+        tft.drawString(quoteLN3, 10, 85, 1);
+        tft.drawString(quoteLN4, 10, 95, 1);
+        tft.drawRightString(quoteLN5, 145, 110, 1);
+      }
+
+      static int lastCounterInMode4 = -1;
+      static int lastFlashSecond = -1;
+      bool encoderMoved = (counter != lastCounterInMode4);
+      bool flashOn = (millis() / 1000) % 2 == 0;
+      char timeStr[6];
+      sprintf(timeStr, "%02d:%02d", (int)(countdown / 60) % 60, (int)countdown % 60);
+
+      if (encoderMoved || (int)(millis() / 1000) != lastFlashSecond || ScrRefresh == 1) {
+        if (flashOn || encoderMoved) {
+          tft.setTextColor(FgColour, BgColour);
+          tft.drawCentreString(timeStr, 80, 40, 2);
+        } else {
+          tft.setTextColor(BgColour, BgColour);
+          tft.drawCentreString(timeStr, 80, 40, 2);
+          tft.setTextColor(FgColour, BgColour);
+        }
+        if (encoderMoved) {
+          tone(Spkr, 2300, 4);
+          timeout = millis(); // Reset timeout on encoder activity
+        }
+        lastCounterInMode4 = counter;
+        lastFlashSecond = (int)(millis() / 1000);
+      }
+      
+      if (ScrRefresh == 1) {
+        ScrRefresh = 0;
+      }
     }
     else {
-      encoder = counter;
-      timer = millis();
-      timeout = millis();
-      tft.fillScreen(BgColour);
-      ScrRefresh = 1;
-      mode=1;
-      return;
+      if (ScrRefresh == 1) {
+        tft.setTextColor(TFT_RED, BgColour);
+        tft.drawCentreString("OPEN DOOR", 80, 50, 4); // Center of the screen in Font 4
+        ScrRefresh = 0;
+      }
     }
-  }
+    tft.setTextColor(FgColour, BgColour);
 
-  if (millis() - timeout >= 10000) {
-    if (paused > 0) {
-      encoder = counter;
-      timeout = millis();
-      timer = 0;
-      paused = 0;
-      tft.fillScreen(BgColour);
-      ScrRefresh = 1;
-      mode=6;
-      return;
+    if (door==0) {
+      if (paused > 0) {
+        selectedSeconds = countdown;
+        timer = millis();
+        timeout = millis();
+        lastCounter = counter;
+        tft.fillScreen(BgColour);
+        ScrRefresh = 1;
+        mode=3;
+        return;
+      }
+      else {
+        encoder = counter;
+        timer = millis();
+        timeout = millis();
+        tft.fillScreen(BgColour);
+        ScrRefresh = 1;
+        mode=1;
+        return;
+      }
+    }
+
+    if (millis() - timeout >= 10000) {
+      if (paused > 0) {
+        encoder = counter;
+        timeout = millis();
+        timer = 0;
+        paused = 0;
+        tft.fillScreen(BgColour);
+        ScrRefresh = 1;
+        mode=6;
+        return;
+      }
     }
   }
-}
 
   if (mode==5) { // ******************************** MODE 5 - Done Cooking ****************************
     digitalWrite(Light,HIGH);
@@ -750,7 +754,7 @@ void loop() {
       ScrRefresh = 1;
       mode=1;
     }
-}
+  }
 
   if (mode==6) { // ******************************** MODE 6 - Canceled ********************************
     digitalWrite(Light,HIGH);
@@ -773,38 +777,38 @@ void loop() {
         mode=1;
       }
     }
-} 
+  } 
 
   if (WiFi.getMode() == WIFI_STA && WiFi.status() == WL_CONNECTED && millis() - refreshTime > 3600000) { //********** TIME FETCH *************************************
     timeClient.update();
     ScrRefresh = 1;
     refreshTime = millis();
-    }
+  }
 
   if (WiFi.getMode() == WIFI_STA && WiFi.status() == WL_CONNECTED && millis() - refreshWeather > 600000) { //******** WEATHER FETCH **********************************
-  quotesFetch();
-  openWeatherFetch();
-  ScrRefresh = 1;
-  refreshWeather = millis();
+    quotesFetch();
+    openWeatherFetch();
+    ScrRefresh = 1;
+    refreshWeather = millis();
   }
 
   if (Debug && millis()-debugtimer >= 300) {//****** DEBUG ********************************************
-  Serial.print("timer "); Serial.print(timer); Serial.print(" ");
-  Serial.print(" paused ");Serial.print(paused);
-  //Serial.print(" door "); Serial.print(door); Serial.print(" ");
-  Serial.print(" encoder "); Serial.print(encoder); Serial.print(" ");
-  Serial.print(" counter "); Serial.print(counter); Serial.print(" ");
-  //Serial.print("time "); Serial.print (timeClient.getHours()); Serial.print(" ");
-  //Serial.print("date "); Serial.print (buf); Serial.print(" ");
-  //Serial.print(" button "); Serial.print (button); Serial.print(" ");
-  Serial.print(" ScrRefresh "); Serial.print (ScrRefresh); Serial.print(" ");
-  Serial.print(" refreshTimer "); Serial.print (millis()-refreshTimer); Serial.print(" ");
-  //Serial.print("button read 5"); Serial.print (analogRead(34)); Serial.print(" ");
-  //Serial.print("temperature "); Serial.print (temperature); Serial.print(" ");
-  //Serial.print("IP "); Serial.print(WiFi.localIP()); Serial.print(" ");
-  Serial.print(" Mode "); Serial.println(mode);
+    Serial.print("timer "); Serial.print(timer); Serial.print(" ");
+    Serial.print(" paused ");Serial.print(paused);
+    //Serial.print(" door "); Serial.print(door); Serial.print(" ");
+    Serial.print(" encoder "); Serial.print(encoder); Serial.print(" ");
+    Serial.print(" counter "); Serial.print(counter); Serial.print(" ");
+    //Serial.print("time "); Serial.print (timeClient.getHours()); Serial.print(" ");
+    //Serial.print("date "); Serial.print (buf); Serial.print(" ");
+    //Serial.print(" button "); Serial.print (button); Serial.print(" ");
+    Serial.print(" ScrRefresh "); Serial.print (ScrRefresh); Serial.print(" ");
+    Serial.print(" refreshTimer "); Serial.print (millis()-refreshTimer); Serial.print(" ");
+    //Serial.print("button read 5"); Serial.print (analogRead(34)); Serial.print(" ");
+    //Serial.print("temperature "); Serial.print (temperature); Serial.print(" ");
+    //Serial.print("IP "); Serial.print(WiFi.localIP()); Serial.print(" ");
+    Serial.print(" Mode "); Serial.println(mode);
 
-  debugtimer = millis();
+    debugtimer = millis();
   }
 
 }
